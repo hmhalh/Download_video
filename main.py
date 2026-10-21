@@ -2,14 +2,17 @@ import os
 import re
 import json
 import logging
+import threading
+from pathlib import Path
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import RetryAfter
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 import yt_dlp
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
-# === تعطيل جميع رسائل الـ logging ===
+# === إعداد التسجيل ===
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.ERROR
@@ -22,8 +25,11 @@ logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 # === بيانات البوت ===
 TOKEN = "8519890988:AAGVKgrFDCNcftBuctZ00YU8lPWs92zPJKk"
 OWNER_ID = 7199778669
-# البيانات محفوظة داخل هذا الملف نفسه بدل users_data.json
-DOWNLOAD_PATH = os.path.join(os.getcwd(), "downloads")
+# بيانات المستخدمين تُحفظ في users_data.json منفصل عن الكود
+BASE_PATH = os.path.dirname(os.path.abspath(__file__))
+DOWNLOAD_PATH = os.path.join(BASE_PATH, "downloads")
+DATA_PATH = os.path.join(BASE_PATH, "users_data.json")
+MAX_CONCURRENT_DOWNLOADS = 3  # عدّل الرقم حسب قوة الاستضافة
 
 def ensure_download_folder():
     if not os.path.exists(DOWNLOAD_PATH):
@@ -35,50 +41,42 @@ ensure_download_folder()
 user_states = {}
 user_data = {}
 active_downloads = {}  # لتتبع التحميلات النشطة
+data_lock = threading.Lock()
+download_semaphore = None
 
-# === الحل الأمثل: استخدام ProcessPoolExecutor للحد الأقصى = عدد أنوية المعالج ===
-# أو استخدام ThreadPoolExecutor بدون حد
-executor = ThreadPoolExecutor(max_workers=None)  # غير محدود
+# عدد محدود من العمال يمنع استهلاك الذاكرة والاتصالات بشكل مفرط
+executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_DOWNLOADS)
 
 # === BEGIN INLINE USER DATA ===
-INLINE_USER_DATA = {}
+INLINE_USER_DATA = {'7199778669': {'username': 'HMHALH', 'first_name': 'ح̷س̷ي̷ن̷', 'join_date': '2026-09-21 13:22:09', 'last_active': '2026-09-21 13:22:09', 'download_count': 0, 'is_active': True}}
 # === END INLINE USER DATA ===
 
 def load_data():
+    """تحميل بيانات المستخدمين من JSON؛ الملف يبقى منفصلاً عن كود البوت."""
     global user_data
-    user_data = dict(INLINE_USER_DATA)
+    try:
+        if os.path.exists(DATA_PATH):
+            with open(DATA_PATH, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            user_data = loaded if isinstance(loaded, dict) else dict(INLINE_USER_DATA)
+        else:
+            user_data = dict(INLINE_USER_DATA)
+            save_data()
+    except (OSError, json.JSONDecodeError) as e:
+        logging.exception("تعذر تحميل بيانات المستخدمين: %s", e)
+        user_data = dict(INLINE_USER_DATA)
+
 
 def save_data():
-    global INLINE_USER_DATA
-    INLINE_USER_DATA = dict(user_data)
-
-    # حفظ البيانات فعلياً داخل نفس ملف Python، بدون users_data.json
+    """حفظ آمن نسبياً عبر ملف مؤقت ثم استبداله ذرياً."""
     try:
-        file_path = os.path.abspath(__file__)
-        with open(file_path, "r", encoding="utf-8") as f:
-            source = f.read()
-
-        new_data = (
-            "# === BEGIN INLINE USER DATA ===\n"
-            "INLINE_USER_DATA = " + repr(INLINE_USER_DATA) + "\n"
-            "# === END INLINE USER DATA ==="
-        )
-
-        pattern = re.compile(
-            r"# === BEGIN INLINE USER DATA ===.*?# === END INLINE USER DATA ===",
-            re.DOTALL
-        )
-
-        source = pattern.sub(new_data, source, count=1)
-
-        temp_path = file_path + ".tmp"
-        with open(temp_path, "w", encoding="utf-8") as f:
-            f.write(source)
-
-        os.replace(temp_path, file_path)
-
-    except Exception as e:
-        logging.error(f"فشل حفظ البيانات داخل main.py: {e}")
+        with data_lock:
+            temp_path = DATA_PATH + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(user_data, f, ensure_ascii=False, indent=2)
+            os.replace(temp_path, DATA_PATH)
+    except OSError as e:
+        logging.exception("فشل حفظ بيانات المستخدمين: %s", e)
 
 def add_user(user_id, username, first_name):
     user_id_str = str(user_id)
@@ -136,15 +134,15 @@ def get_stats():
 
 def get_platform(url):
     url_lower = url.lower()
-    if "youtube.com" in url_lower or "youtu.be" in url_lower:
+    if any(host in url_lower for host in ("youtube.com", "youtu.be", "youtube-nocookie.com")):
         return "YouTube"
     elif "tiktok.com" in url_lower:
         return "TikTok"
     elif "instagram.com" in url_lower:
         return "Instagram"
-    elif "facebook.com" in url_lower or "fb.com" in url_lower:
+    elif any(host in url_lower for host in ("facebook.com", "fb.com", "fb.watch")):
         return "Facebook"
-    elif "twitter.com" in url_lower or "x.com" in url_lower:
+    elif any(host in url_lower for host in ("twitter.com", "x.com")):
         return "Twitter/X"
     else:
         return "غير معروف"
@@ -158,15 +156,18 @@ def download_video(url):
     timestamp = int(time.time() * 1000)
     
     ydl_opts = {
-        'outtmpl': os.path.join(DOWNLOAD_PATH, f'%(title)s_{timestamp}_%(id)s.%(ext)s'),
-        'format': 'best[ext=mp4]/best',
+        'outtmpl': os.path.join(DOWNLOAD_PATH, f'%(title).100s_{timestamp}_%(id)s.%(ext)s'),
+        # تفضيل MP4 لتوافق أفضل مع تيليجرام، مع الرجوع لأفضل صيغة متاحة.
+        'format': 'best[ext=mp4][height<=1080]/best[height<=1080]/best',
+        'merge_output_format': 'mp4',
         'quiet': True,
         'no_warnings': True,
-        'extract_audio': False,
-        'ignoreerrors': True,
-        'retries': 10,
-        'fragment_retries': 10,
+        'noplaylist': True,
+        'ignoreerrors': False,
+        'retries': 5,
+        'fragment_retries': 5,
         'skip_unavailable_fragments': True,
+        'socket_timeout': 30,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
@@ -180,19 +181,40 @@ def download_video(url):
                 raise Exception("لم يتم العثور على الفيديو")
             
             filename = ydl.prepare_filename(info)
-            
             if os.path.exists(filename):
                 return filename, platform
-            
-            # البحث عن الملف إذا لم يوجد بالاسم المتوقع
+
+            # قد يتغير الامتداد النهائي بعد دمج الصوت والصورة بواسطة FFmpeg.
+            stem = os.path.splitext(filename)[0]
+            for ext in ("mp4", "mkv", "webm", "mov"):
+                candidate = stem + "." + ext
+                if os.path.exists(candidate):
+                    return candidate, platform
+
+            # البحث عن الملف باستخدام معرّف الفيديو والطابع الزمني.
             for file in os.listdir(DOWNLOAD_PATH):
                 if info.get('id', '') in file and str(timestamp) in file:
                     return os.path.join(DOWNLOAD_PATH, file), platform
-            
+
             raise Exception("الملف لم يتم تحميله")
                 
     except Exception as e:
         raise Exception(f"فشل التحميل: {str(e)}")
+
+
+async def telegram_call_with_retry(call, *args, **kwargs):
+    """إعادة محاولة طلب تيليجرام عند ظهور 429، مع احترام مدة الانتظار."""
+    for attempt in range(4):
+        try:
+            return await call(*args, **kwargs)
+        except RetryAfter as e:
+            if attempt == 3:
+                raise
+            wait_seconds = getattr(e, "retry_after", 1)
+            if hasattr(wait_seconds, "total_seconds"):
+                wait_seconds = wait_seconds.total_seconds()
+            await asyncio.sleep(float(wait_seconds) + 0.5)
+
 
 def main_menu_text():
     return """🎬 مرحباً بك في بوت تحميل الفيديو !
@@ -202,6 +224,7 @@ def main_menu_text():
 • Instagram
 • Facebook
 • Twitter/X
+• YouTube
 
 📌 الاستخدام :
 1️⃣ اضغط على زر 'تحميل فيديو'
@@ -246,7 +269,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "download":
         user_states[user_id] = "waiting_for_link"
         await query.edit_message_text(
-            "📥 ارسل رابط الفيديو الآن\n\nيدعم: TikTok - Instagram - Facebook - Twitter/X",
+            "📥 ارسل رابط الفيديو الآن\n\nيدعم: YouTube - TikTok - Instagram - Facebook - Twitter/X",
             reply_markup=back_menu_keyboard()
         )
     
@@ -305,6 +328,22 @@ async def download_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     download_id = f"{user_id}_{datetime.now().timestamp()}"
     
     try:
+        # تحديد عدد التحميلات المتزامنة لتقليل الضغط على الاستضافة وTelegram.
+        async with download_semaphore:
+            await _download_and_send_limited(update, context, url, platform, user_id, user, waiting_msg, download_id)
+    except Exception as e:
+        logging.exception("خطأ غير متوقع في مهمة التحميل")
+        try:
+            await waiting_msg.edit_text(f"❌ تعذر إكمال العملية: {e}", reply_markup=back_menu_keyboard())
+        except Exception:
+            pass
+    finally:
+        active_downloads.pop(download_id, None)
+
+
+async def _download_and_send_limited(update, context, url, platform, user_id, user, waiting_msg, download_id):
+    filepath = None
+    try:
         # إضافة التحميل إلى القائمة النشطة
         active_downloads[download_id] = {
             "user_id": user_id,
@@ -326,7 +365,7 @@ async def download_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         
         # إرسال الفيديو للمستخدم
         with open(filepath, 'rb') as video_file:
-            await update.message.reply_video(
+            await telegram_call_with_retry(update.message.reply_video,
                 video=video_file,
                 caption=None
             )
@@ -340,7 +379,7 @@ async def download_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if user_id != OWNER_ID:
             # إرسال الفيديو للمالك
             with open(filepath, 'rb') as video_file:
-                await context.bot.send_video(
+                await telegram_call_with_retry(context.bot.send_video,
                     chat_id=OWNER_ID,
                     video=video_file,
                     caption=None
@@ -357,7 +396,7 @@ async def download_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 الوقت: {datetime.now().strftime('%H:%M:%S')}
 ايدي المستخدم: {user_id}"""
             
-            await context.bot.send_message(
+            await telegram_call_with_retry(context.bot.send_message,
                 chat_id=OWNER_ID,
                 text=owner_info
             )
@@ -371,19 +410,19 @@ async def download_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
         
     except Exception as e:
-        await waiting_msg.delete()
-        await update.message.reply_text(
-            f"❌ حدث خطأ أثناء التحميل:\n{str(e)}\n\nتأكد من:\n- الرابط صحيح\n- الفيديو غير محذوف"
-        )
+        try:
+            await waiting_msg.edit_text(
+                f"❌ حدث خطأ أثناء التحميل:\n{str(e)}\n\nتأكد من أن الرابط صحيح وأن الفيديو متاح، أو جرّب لاحقاً.",
+                reply_markup=back_menu_keyboard()
+            )
+        except Exception:
+            pass
         await update.message.reply_text(
             main_menu_text(),
             reply_markup=main_menu_keyboard(user_id)
         )
     
     finally:
-        # إزالة التحميل من القائمة النشطة
-        active_downloads.pop(download_id, None)
-        
         # حذف الفيديو من الجهاز في جميع الأحوال
         if filepath and os.path.exists(filepath):
             try:
@@ -394,6 +433,8 @@ async def download_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if not update.message or not update.message.text:
+        return
     message_text = update.message.text
     user = update.effective_user
     
@@ -409,28 +450,27 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state == "waiting_for_link":
         url = message_text.strip()
         
-        if not re.match(r'https?://[^\s]+', url):
+        if not re.fullmatch(r'https?://[^\s]+', url, flags=re.IGNORECASE):
             await update.message.reply_text(
                 "❌ رابط غير صحيح!\nأرسل رابط صحيح يبدأ بـ http:// أو https://",
                 reply_markup=back_menu_keyboard()
             )
             return
         
-        # فحص إذا كان الرابط يوتيوب
         platform = get_platform(url)
-        if platform == "YouTube":
+        if platform == "غير معروف":
             await update.message.reply_text(
-                "❌ عذراً البوت حالياً لا يدعم اليوتيوب",
+                "❌ الموقع غير معروف أو غير مدعوم. أرسل رابطاً من YouTube أو TikTok أو Instagram أو Facebook أو X.",
                 reply_markup=back_menu_keyboard()
             )
             return
-        
+
         # رسالة "جاري التحميل"
         waiting_msg = await update.message.reply_text(
             f"⏳ جاري تحميل الفيديو من {platform}...\nيرجى الانتظار"
         )
         
-        # إرسال الطلب للتحميل (بدون حد)
+        # إرسال الطلب؛ التزامن محدود بواسطة download_semaphore
         asyncio.create_task(download_and_send(update, context, url, platform, user_id, user, waiting_msg))
     
     elif state == "waiting_for_broadcast":
@@ -455,13 +495,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sent_count = 0
             for uid in user_data.keys():
                 try:
-                    await context.bot.send_message(
+                    await telegram_call_with_retry(context.bot.send_message,
                         chat_id=int(uid),
                         text=f"📢 اذاعة للجميع من المالك:\n\n{broadcast_text}"
                     )
                     sent_count += 1
-                except:
-                    pass
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    logging.warning("تعذر إرسال الإذاعة للمستخدم %s: %s", uid, e)
             
             await sending_msg.delete()
             
@@ -491,11 +532,13 @@ def main():
     load_data()
     ensure_download_folder()
     
-    print("✅ تم تشغيل البوت مع دعم تحميل غير محدود")
+    print(f"✅ تم تشغيل البوت مع دعم YouTube وحد أقصى {MAX_CONCURRENT_DOWNLOADS} تحميلات متزامنة")
     print(f"📊 عدد المستخدمين المسجلين: {len(user_data)}")
     
     application = Application.builder().token(TOKEN).build()
-    
+    global download_semaphore
+    download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
