@@ -164,8 +164,6 @@ def get_stats():
 # URL validation
 # ============================================================
 ALLOWED_HOSTS = {
-    "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
-    "youtube-nocookie.com", "www.youtube-nocookie.com",
     "tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com",
     "instagram.com", "www.instagram.com", "m.instagram.com",
     "facebook.com", "www.facebook.com", "m.facebook.com", "fb.watch",
@@ -188,8 +186,6 @@ def validate_media_url(url):
 
 def get_platform(url):
     host = (urlparse(url).hostname or "").lower().rstrip(".")
-    if host == "youtu.be" or host.endswith("youtube.com") or host.endswith("youtube-nocookie.com"):
-        return "YouTube"
     if host.endswith("tiktok.com"):
         return "TikTok"
     if host.endswith("instagram.com"):
@@ -282,13 +278,15 @@ async def telegram_call_with_retry(call, *args, **kwargs):
             await asyncio.sleep(float(delay) + 0.5)
 
 
-def main_menu_text():
+def main_menu_text(first_name=None):
     stats = get_stats()
+    display_name = (first_name or "صديقي").strip()
     return (
-        "🎬 بوت تحميل الفيديو\n"
+        f"مرحباً {display_name} 👋\n"
+        "🎬 أنت في بوت تحميل الفيديو من مواقع التواصل الاجتماعي\n"
         "📥 اضغط (تحميل فيديو) وأرسل الرابط.\n"
         f"📊 عدد التحميلات الناجحة: {stats['total_downloads']}\n"
-        "YouTube • TikTok • Instagram • Facebook • X"
+        "TikTok • Instagram • Facebook • X"
     )
 
 
@@ -327,7 +325,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(user.id, user.username, user.first_name)
     user_states.pop(user.id, None)
     await update.effective_message.reply_text(
-        main_menu_text(), reply_markup=main_menu_keyboard(user.id)
+        main_menu_text(user.first_name), reply_markup=main_menu_keyboard(user.id)
     )
 
 
@@ -400,7 +398,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "back":
         user_states.pop(user_id, None)
-        await safe_edit_or_reply(query, main_menu_text(), main_menu_keyboard(user_id))
+        await safe_edit_or_reply(query, main_menu_text(query.from_user.first_name), main_menu_keyboard(user_id))
 
 
 # ============================================================
@@ -466,7 +464,7 @@ async def download_and_send(update, context, url, media_type, user, waiting_msg,
                 logging.warning("Could not send downloaded video or notification to owner")
 
         await update.effective_message.reply_text(
-            main_menu_text(), reply_markup=main_menu_keyboard(user.id)
+            main_menu_text(user.first_name), reply_markup=main_menu_keyboard(user.id)
         )
 
     except Exception as exc:
@@ -514,7 +512,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not validate_media_url(text):
             await message.reply_text(
                 "❌ الرابط غير صحيح أو الموقع غير مدعوم. أرسل رابطاً كاملاً من "
-                "YouTube أو TikTok أو Instagram أو Facebook أو X.",
+                "TikTok أو Instagram أو Facebook أو X.",
                 reply_markup=back_menu_keyboard(),
             )
             return
@@ -565,7 +563,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    await message.reply_text(main_menu_text(), reply_markup=main_menu_keyboard(user_id))
+    await message.reply_text(main_menu_text(user.first_name), reply_markup=main_menu_keyboard(user_id))
 
 
 async def post_shutdown(application):
