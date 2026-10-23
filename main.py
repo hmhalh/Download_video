@@ -281,8 +281,8 @@ async def telegram_call_with_retry(call, *args, **kwargs):
 def main_menu_text(first_name=None):
     display_name = (first_name or "صديقي").strip()
     return (
-        f"مرحباً بك {display_name} 👋\n\n"
-        "🎬 في بوت تحميل الفيديو من مواقع التواصل الاجتماعي\n"
+        f"مرحباً بك {display_name} 👋 في\n\n"
+        "بوت تحميل من مواقع التواصل الاجتماعي\n\n"
         "📥 اضغط (تحميل فيديو) وأرسل الرابط\n\n"
         "TikTok • Instagram • Facebook • تويتر X"
     )
