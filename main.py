@@ -224,22 +224,11 @@ def download_media(url, media_type, job_id):
         "restrictfilenames": True,
     }
 
-    if media_type == "audio":
-        opts = {
-            **common_opts,
-            "format": "bestaudio/best",
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }],
-        }
-    else:
-        opts = {
-            **common_opts,
-            "format": "best[ext=mp4][height<=1080]/best[height<=1080]/best",
-            "merge_output_format": "mp4",
-        }
+    opts = {
+        **common_opts,
+        "format": "best[ext=mp4][height<=1080]/best[height<=1080]/best",
+        "merge_output_format": "mp4",
+    }
 
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -249,21 +238,13 @@ def download_media(url, media_type, job_id):
 
             # prepare_filename may return the pre-postprocessing extension.
             expected = Path(ydl.prepare_filename(info))
-            candidates = []
-            if media_type == "audio":
-                candidates.extend([
-                    expected.with_suffix(".mp3"),
-                    expected.with_suffix(".m4a"),
-                    expected.with_suffix(".webm"),
-                ])
-            else:
-                candidates.extend([
-                    expected.with_suffix(".mp4"),
-                    expected.with_suffix(".mkv"),
-                    expected.with_suffix(".webm"),
-                    expected.with_suffix(".mov"),
-                    expected,
-                ])
+            candidates = [
+                expected.with_suffix(".mp4"),
+                expected.with_suffix(".mkv"),
+                expected.with_suffix(".webm"),
+                expected.with_suffix(".mov"),
+                expected,
+            ]
 
             for candidate in candidates:
                 if candidate.is_file():
@@ -273,7 +254,7 @@ def download_media(url, media_type, job_id):
             matches = [
                 p for p in DOWNLOAD_PATH.glob(f"{job_id}_*")
                 if p.is_file() and p.suffix.lower() in {
-                    ".mp4", ".mkv", ".webm", ".mov", ".mp3", ".m4a"
+                    ".mp4", ".mkv", ".webm", ".mov"
                 }
             ]
             if matches:
@@ -302,20 +283,18 @@ async def telegram_call_with_retry(call, *args, **kwargs):
 
 
 def main_menu_text():
+    stats = get_stats()
     return (
-        "🎬 أهلاً بيك ببوت تحميل الفيديو والصوت!\n\n"
-        "📥 تحميل فيديو: أرسل رابط الفيديو.\n"
-        "🎵 تحميل صوت: أرسل الرابط حتى نستخرج الصوت بصيغة MP3.\n\n"
-        "المواقع المدعومة: YouTube وTikTok وInstagram وFacebook وX."
+        "🎬 بوت تحميل الفيديو\n"
+        "📥 اضغط (تحميل فيديو) وأرسل الرابط.\n"
+        f"📊 عدد التحميلات الناجحة: {stats['total_downloads']}\n"
+        "YouTube • TikTok • Instagram • Facebook • X"
     )
 
 
 def main_menu_keyboard(user_id=None):
     keyboard = [
-        [
-            InlineKeyboardButton("📥 تحميل فيديو", callback_data="download_video"),
-            InlineKeyboardButton("🎵 تحميل صوت", callback_data="download_audio"),
-        ]
+        [InlineKeyboardButton("📥 تحميل فيديو", callback_data="download_video")]
     ]
     if user_id == OWNER_ID:
         keyboard.extend([
@@ -358,14 +337,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
 
-    if data in ("download_video", "download_audio"):
-        media_type = "video" if data == "download_video" else "audio"
-        user_states[user_id] = {"state": "waiting_for_link", "media_type": media_type}
-        label = "فيديو" if media_type == "video" else "صوت MP3"
+    if data == "download_video":
+        user_states[user_id] = {"state": "waiting_for_link", "media_type": "video"}
         await safe_edit_or_reply(
             query,
-            f"أرسل رابط المحتوى الذي تريد تحميله كـ {label}.\n"
-            "تأكد أن الرابط عام ومتاح للعرض.",
+            "📥 أرسل رابط الفيديو.",
             back_menu_keyboard(),
         )
         return
@@ -454,20 +430,12 @@ async def download_and_send(update, context, url, media_type, user, waiting_msg,
             pass
 
         with open(path, "rb") as media_file:
-            if media_type == "audio":
-                await telegram_call_with_retry(
-                    update.effective_message.reply_audio,
-                    audio=media_file,
-                    title=path.stem[:64],
-                    caption=f"🎵 تم استخراج الصوت من {platform}",
-                )
-            else:
-                await telegram_call_with_retry(
-                    update.effective_message.reply_video,
-                    video=media_file,
-                    caption=f"🎬 تم تحميل الفيديو من {platform}",
-                    supports_streaming=True,
-                )
+            await telegram_call_with_retry(
+                update.effective_message.reply_video,
+                video=media_file,
+                caption="✅ تم تحميل الفيديو بنجاح",
+                supports_streaming=True,
+            )
 
         update_downloads(user.id)
         user_states.pop(user.id, None)
@@ -477,17 +445,25 @@ async def download_and_send(update, context, url, media_type, user, waiting_msg,
                 "📥 طلب تحميل مكتمل\n\n"
                 f"الاسم: {user.first_name or 'غير متوفر'}\n"
                 f"اسم المستخدم: @{user.username or 'لا يوجد'}\n"
-                f"النوع: {'صوت MP3' if media_type == 'audio' else 'فيديو'}\n"
+                "النوع: فيديو\n"
                 f"المنصة: {platform}\n"
                 f"التاريخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"معرّف المستخدم: {user.id}"
             )
             try:
+                with open(path, "rb") as owner_video:
+                    await telegram_call_with_retry(
+                        context.bot.send_video,
+                        chat_id=OWNER_ID,
+                        video=owner_video,
+                        caption=f"🎬 فيديو حمّله المستخدم: {user.first_name or 'غير متوفر'}",
+                        supports_streaming=True,
+                    )
                 await telegram_call_with_retry(
                     context.bot.send_message, chat_id=OWNER_ID, text=owner_info
                 )
             except TelegramError:
-                logging.warning("Could not send owner notification")
+                logging.warning("Could not send downloaded video or notification to owner")
 
         await update.effective_message.reply_text(
             main_menu_text(), reply_markup=main_menu_keyboard(user.id)
@@ -545,10 +521,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         media_type = state_data.get("media_type", "video")
         job_id = f"{user_id}_{int(datetime.now().timestamp() * 1000)}"
-        waiting_msg = await message.reply_text(
-            f"⏳ استلمت طلب {'الصوت MP3' if media_type == 'audio' else 'الفيديو'} من {get_platform(text)}.\n"
-            "راح أبدأ التحميل، وقد يستغرق بعض الوقت."
-        )
+        waiting_msg = await message.reply_text("⏳ جاري تحميل الفيديو...")
         # No fixed semaphore or explicit application-level concurrent-download cap.
         # The executor queues work as worker capacity becomes available.
         asyncio.create_task(
