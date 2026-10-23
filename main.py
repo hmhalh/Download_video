@@ -279,14 +279,12 @@ async def telegram_call_with_retry(call, *args, **kwargs):
 
 
 def main_menu_text(first_name=None):
-    stats = get_stats()
     display_name = (first_name or "صديقي").strip()
     return (
-        f"مرحباً {display_name} 👋\n"
-        "🎬 أنت في بوت تحميل الفيديو من مواقع التواصل الاجتماعي\n"
-        "📥 اضغط (تحميل فيديو) وأرسل الرابط.\n"
-        f"📊 عدد التحميلات الناجحة: {stats['total_downloads']}\n"
-        "TikTok • Instagram • Facebook • X"
+        f"مرحباً بك {display_name} 👋\n\n"
+        "🎬 في بوت تحميل الفيديو من مواقع التواصل الاجتماعي\n"
+        "📥 اضغط (تحميل فيديو) وأرسل الرابط\n\n"
+        "TikTok • Instagram • Facebook • تويتر X"
     )
 
 
